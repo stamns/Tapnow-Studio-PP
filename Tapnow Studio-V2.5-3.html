@@ -3365,6 +3365,180 @@
                 });
             };
 
+            // 异步图像生成任务轮询函数
+            const pollImageTask = (taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt = 0, isBananaModel = false) => {
+                // banana模型使用800秒超时（160次 * 5秒），其他模型使用25分钟（300次 * 5秒）
+                const maxAttempts = isBananaModel ? 160 : 300;
+                const delayMs = 5000; // 每5秒轮询一次
+
+                if (attempt > maxAttempts) {
+                    const timeoutSeconds = isBananaModel ? 800 : 1500;
+                    setHistory((prev) => prev.map((hItem) => 
+                        hItem.id === taskId 
+                            ? { ...hItem, status: 'failed', errorMsg: `图像生成轮询超时（已等待${timeoutSeconds}秒）` } 
+                            : hItem
+                    ));
+                    return;
+                }
+
+                const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+                const pollUrl = `${cleanBaseUrl}/v1/images/tasks/${taskIdForPoll}`;
+
+                fetch(pollUrl, {
+                    method: 'GET',
+                    headers: { 
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                })
+                .then((resp) => resp.text())
+                .then((text) => {
+                    let data;
+                    try { 
+                        data = JSON.parse(text); 
+                    } catch (err) { 
+                        console.error('[Async Image] Failed to parse response:', err);
+                        setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), delayMs); 
+                        return; 
+                    }
+
+                    console.log('[Async Image] Poll:', data);
+                    
+                    // 根据API规范，响应格式可能有多种：
+                    // 1. { code, message, data: { status, images: [...] } }
+                    // 2. { status: "SUCCESS", data: { data: [{ url: "..." }] } }
+                    // 3. { task_id: "...", status: "SUCCESS", data: { data: [{ url: "..." }] } }
+                    const status = (data?.data?.status || data?.status || '').toUpperCase();
+                    let images = [];
+                    
+                    // 尝试多种方式提取图片数据
+                    if (data?.data?.images && Array.isArray(data.data.images)) {
+                        images = data.data.images;
+                    } else if (data?.data?.data && Array.isArray(data.data.data)) {
+                        // 嵌套格式：data.data 是图片数组
+                        images = data.data.data;
+                    } else if (data?.images && Array.isArray(data.images)) {
+                        images = data.images;
+                    } else if (data?.data && Array.isArray(data.data)) {
+                        images = data.data;
+                    }
+                    
+                    const errorMsg = data?.message || data?.error || data?.fail_reason || '';
+
+                    // 更新历史记录
+                    setHistory((prev) => prev.map((hItem) => {
+                        if (hItem.id === taskId) {
+                            // 支持多种成功状态值
+                            if (status === 'COMPLETED' || status === 'SUCCESS' || status === 'FINISHED' || status === 'DONE') {
+                                // 任务完成
+                                if (images && images.length > 0) {
+                                    // 提取图片URL，支持多种字段名和格式
+                                    const imageUrls = images.map(img => {
+                                        if (typeof img === 'string') return img;
+                                        return img?.url || img?.image_url || img?.imageUrl || '';
+                                    }).filter(Boolean);
+                                    
+                                    if (imageUrls.length > 0) {
+                                        const primaryUrl = imageUrls[0];
+                                        const endTime = Date.now();
+                                        const durationMs = endTime - (hItem.startTime || endTime);
+                                        
+                                        // 更新预览窗口
+                                        if (sourceNodeId) {
+                                            setTimeout(() => {
+                                                console.log('[Async Image] 准备更新预览窗口', { taskId, url: primaryUrl, sourceNodeId, imageCount: imageUrls.length });
+                                                updatePreviewFromTask(taskId, primaryUrl, 'image', sourceNodeId, imageUrls.length > 1 ? imageUrls : null);
+                                            }, 0);
+                                        }
+                                        
+                                        return { 
+                                            ...hItem, 
+                                            status: 'completed', 
+                                            progress: 100, 
+                                            url: primaryUrl,
+                                            width: w,
+                                            height: h,
+                                            durationMs,
+                                            errorMsg: null,
+                                            ...(imageUrls.length > 1 ? { mjImages: imageUrls, selectedMjImageIndex: 0 } : {})
+                                        };
+                                    }
+                                }
+                                // 如果没有图片，标记为失败
+                                return { 
+                                    ...hItem, 
+                                    status: 'failed', 
+                                    errorMsg: errorMsg || '任务完成但未返回图片' 
+                                };
+                            } else if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILURE') {
+                                // 任务失败
+                                return { 
+                                    ...hItem, 
+                                    status: 'failed', 
+                                    errorMsg: errorMsg || `任务失败: ${status}` 
+                                };
+                            } else if (status === 'PENDING' || status === 'PROCESSING' || status === 'GENERATING' || status === 'IN_PROGRESS' || status === 'RUNNING') {
+                                // 任务进行中，根据轮询次数和进度信息计算进度
+                                let progress = 10 + (attempt * 2); // 基础进度
+                                
+                                // 如果有进度百分比，使用实际进度
+                                if (data?.data?.progress) {
+                                    const progressStr = String(data.data.progress);
+                                    if (progressStr.includes('%')) {
+                                        progress = parseInt(progressStr.replace('%', ''), 10) || progress;
+                                    } else if (typeof data.data.progress === 'number') {
+                                        progress = data.data.progress;
+                                    }
+                                } else if (data?.progress) {
+                                    const progressStr = String(data.progress);
+                                    if (progressStr.includes('%')) {
+                                        progress = parseInt(progressStr.replace('%', ''), 10) || progress;
+                                    } else if (typeof data.progress === 'number') {
+                                        progress = data.progress;
+                                    }
+                                }
+                                
+                                progress = Math.min(95, Math.max(10, progress)); // 限制在10-95%之间
+                                
+                                return { 
+                                    ...hItem, 
+                                    status: 'generating', 
+                                    progress,
+                                    errorMsg: null
+                                };
+                            } else {
+                                // 未知状态，继续轮询，但进度缓慢增加
+                                const progress = Math.min(90, 10 + (attempt * 1.5));
+                                return { 
+                                    ...hItem, 
+                                    status: 'generating', 
+                                    progress,
+                                    errorMsg: null
+                                };
+                            }
+                        }
+                        return hItem;
+                    }));
+
+                    // 如果任务未完成，继续轮询
+                    // 对于慢任务，如果已经轮询了很多次，可以适当增加间隔
+                    const currentStatus = (data?.data?.status || data?.status || '').toUpperCase();
+                    const isCompleted = currentStatus === 'COMPLETED' || currentStatus === 'SUCCESS' || currentStatus === 'FINISHED' || currentStatus === 'DONE';
+                    const isFailed = currentStatus === 'FAILED' || currentStatus === 'ERROR' || currentStatus === 'CANCELLED' || currentStatus === 'FAILURE';
+                    
+                    if (!isCompleted && !isFailed) {
+                        // 如果已经轮询了很多次（超过50次，约4分钟），增加轮询间隔到10秒
+                        // banana模型由于超时时间更长，可以保持5秒间隔
+                        const adjustedDelay = (attempt > 50 && !isBananaModel) ? 10000 : delayMs;
+                        setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), adjustedDelay);
+                    }
+                })
+                .catch((err) => {
+                    console.error('[Async Image] Poll error:', err);
+                    setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), delayMs);
+                });
+            };
+
             // Midjourney任务轮询函数
             const pollMidjourneyJob = (jobId, taskId, baseUrl, apiKey, mjMode = 'fast', w, h, attempt = 0) => {
                 const maxAttempts = 120; // 最多轮询120次（约10分钟，假设每次5秒）
@@ -3700,7 +3874,7 @@
                         let payload;
                         let useMultipart = false;
 
-                        const isBananaLike = modelId.includes('banana') || modelId.includes('edit') || modelId.includes('qwen');
+                        const isBananaLike = (modelId.includes('banana') || modelId.includes('edit') || modelId.includes('qwen')) && !(modelId.includes('nano-banana-2') || (config?.modelName ?? '').includes('nano-banana-2'));
                         const isOpenAIImage = modelId.includes('gpt') || (config?.modelName ?? '').includes('gpt-image') || (config?.provider ?? '').toLowerCase().includes('gpt-4o image');
                         const isFluxKontext = modelId.includes('flux') || (config?.modelName ?? '').includes('flux-kontext');
                     const isNanoBanana2 = (config?.modelName ?? '').includes('nano-banana-2') || modelId.includes('nano-banana-2');
@@ -3781,15 +3955,57 @@
                             }
                             payload = jsonBody;
                     } else if (isNanoBanana2) {
-                        payload = {
-                            model: config?.modelName,
-                            prompt,
-                            n: 1,
-                            response_format: 'url',
-                            size: sizeStr,
-                            ...(aspect ? { aspect_ratio: aspect } : {}),
-                            ...(imageSizeFlag ? { image_size: imageSizeFlag } : {}),
-                        };
+                        // Nano-banana-2 根据新API规范：有参考图用edits，无参考图用generations
+                        // 支持异步模式：添加async=true查询参数
+                        const useAsync = true; // 默认启用异步模式
+                        
+                        if (connectedImages.length > 0) {
+                            // 有参考图：使用 /v1/images/edits (multipart/form-data)
+                            endpoint = `${baseUrl}/v1/images/edits${useAsync ? '?async=true' : ''}`;
+                            useMultipart = true;
+                            const formData = new FormData();
+                            formData.append('model', config?.modelName || 'nano-banana-2');
+                            formData.append('prompt', prompt || '');
+                            formData.append('response_format', 'url');
+                            if (aspect) formData.append('aspect_ratio', aspect);
+                            if (imageSizeFlag) formData.append('image_size', imageSizeFlag);
+                            
+                            // 将参考图转换为blob并添加到formData
+                            const blobPromises = connectedImages.map(url => getBlobFromUrl(url));
+                            const blobs = await Promise.all(blobPromises);
+                            blobs.forEach((blob, i) => {
+                                formData.append('image', blob, `input_${i}.png`);
+                            });
+                            payload = formData;
+                        } else {
+                            // 无参考图：使用 /v1/images/generations (application/json)
+                            endpoint = `${baseUrl}/v1/images/generations${useAsync ? '?async=true' : ''}`;
+                            const jsonBody = {
+                                model: config?.modelName || 'nano-banana-2',
+                                prompt: prompt || '',
+                                response_format: 'url',
+                                ...(aspect ? { aspect_ratio: aspect } : {}),
+                                ...(imageSizeFlag ? { image_size: imageSizeFlag } : {}),
+                            };
+                            // 如果有sourceImage，添加到image数组（支持url或b64_json格式）
+                            if (sourceImage) {
+                                const trimmedImg = sourceImage.trim();
+                                // 如果是http/https URL，直接使用
+                                if (trimmedImg.startsWith('http://') || trimmedImg.startsWith('https://')) {
+                                    jsonBody.image = [trimmedImg];
+                                } 
+                                // 如果是data URL，直接使用
+                                else if (trimmedImg.startsWith('data:')) {
+                                    jsonBody.image = [trimmedImg];
+                                } 
+                                // 其他格式，转换为base64
+                                else {
+                                    const b64 = await getBase64FromUrl(trimmedImg);
+                                    jsonBody.image = [`data:image/png;base64,${b64}`];
+                                }
+                            }
+                            payload = jsonBody;
+                        }
                     } else if (isMidjourney) {
                         // Midjourney API: 使用 /mj/submit/imagine 接口
                         // 根据文档，支持fast和relax两种模式，通过URL路径区分
@@ -4279,7 +4495,13 @@
                                 body: requestBody,
                             });
                         } catch (fetchError) {
-                            console.error('[即梦API] Fetch请求失败:', {
+                            // 根据模型类型显示不同的错误信息
+                            const isJimengModel = isJimeng;
+                            const isBanana2Model = isNanoBanana2;
+                            const logPrefix = isJimengModel ? '[即梦API]' : isBanana2Model ? '[Nano Banana 2]' : '[Image API]';
+                            const serviceName = isJimengModel ? '即梦API服务' : isBanana2Model ? 'Nano Banana 2 API服务' : '图像生成服务';
+                            
+                            console.error(`${logPrefix} Fetch请求失败:`, {
                                 error: fetchError,
                                 url: fullUrl,
                                 baseUrl: baseUrl,
@@ -4287,10 +4509,10 @@
                             });
                             
                             // 提供更详细的错误信息
-                            let errorMessage = `网络请求失败：无法连接到即梦API服务`;
+                            let errorMessage = `网络请求失败：无法连接到${serviceName}`;
                             
                             if (fetchError.message && fetchError.message.includes('Failed to fetch')) {
-                                errorMessage += `\n\nURL: ${fullUrl}\n\n请检查：\n1. 即梦API代理服务是否正在运行 (${baseUrl})\n2. 服务地址配置是否正确\n3. 网络连接是否正常\n4. 是否有防火墙阻止连接`;
+                                errorMessage += `\n\nURL: ${fullUrl}\n\n请检查：\n1. ${serviceName}是否正在运行 (${baseUrl})\n2. 服务地址配置是否正确\n3. 网络连接是否正常\n4. 是否有防火墙阻止连接`;
                                 
                                 // 检查是否是CORS问题
                                 if (fullUrl.includes('localhost') || fullUrl.includes('127.0.0.1')) {
@@ -4326,8 +4548,8 @@
                                 errorMsg = data.message;
                             }
                             
-                            // 检查是否是后端服务模块缺失错误，优化错误信息显示
-                            if (errorMsg.includes('Cannot find module') || errorMsg.includes('octetstream') || errorMsg.includes('MODULE_NOT_FOUND')) {
+                            // 检查是否是后端服务模块缺失错误，优化错误信息显示（仅对即梦模型）
+                            if (isJimeng && (errorMsg.includes('Cannot find module') || errorMsg.includes('octetstream') || errorMsg.includes('MODULE_NOT_FOUND'))) {
                                 // 提取原始错误信息（去掉可能的重复前缀）
                                 const originalError = errorMsg.replace(/后端服务错误[：:].*?错误详情[：:]/g, '').trim();
                                 errorMsg = `❌ 即梦API代理服务缺少必要模块\n\n错误：${originalError}\n\n🔧 解决方案：\n1. 停止当前的jimeng-api.exe进程\n2. 重新下载最新版本的jimeng-api\n3. 如果使用Docker，请运行：\n   docker pull ghcr.io/iptag/jimeng-api:latest\n   docker run -d --name jimeng-api -p 5100:5100 ghcr.io/iptag/jimeng-api:latest\n4. 如果直接运行exe，请确保所有文件完整`;
@@ -4339,7 +4561,8 @@
                         // 检查即梦API的错误码（即梦API使用code字段表示错误）
                         // code: 0或1表示成功，200表示HTTP成功，其他为错误
                         // 注意：即梦API可能返回负数错误码，如-2001, -1000
-                        if (data?.code !== undefined) {
+                        // 但banana2使用OpenAI格式，不使用code字段
+                        if (isJimeng && data?.code !== undefined) {
                             // 成功码：0, 1, 200
                             const isSuccess = data.code === 0 || data.code === 1 || data.code === 200;
                             if (!isSuccess) {
@@ -4365,24 +4588,141 @@
                             }
                         }
                         
-                        // 即梦API响应格式：{ "created": ..., "data": [{ "url": "..." }, ...] }
-                        // 4.1模型可能返回4张图片，3.1模型返回1张
-                        console.log('[即梦API] 响应数据:', data);
-                        
-                        const imageData = data?.data || [];
-                        if (!imageData || imageData.length === 0) {
-                            console.error('[即梦API] 响应数据:', data);
-                            throw new Error('No Image URL found in response');
+                        // 检查是否是异步模式响应（返回task_id）
+                        // 异步模式响应格式可能有多种：
+                        // 1. { code, message, data: "task_id" }
+                        // 2. { code: 0, data: "task_id" }
+                        // 3. { task_id: "...", status: "pending" }
+                        // 4. { task_id: "..." } (只有task_id，没有其他字段)
+                        if (isNanoBanana2) {
+                            let taskIdForPoll = null;
+                            
+                            // 方式1：data是字符串task_id
+                            if (data?.data && typeof data.data === 'string' && (data.code === '0' || data.code === 0 || data.code === '200' || data.code === 200)) {
+                                taskIdForPoll = data.data;
+                            }
+                            // 方式2：直接有task_id字段
+                            else if (data?.task_id) {
+                                // 如果status是SUCCESS且有data.data，说明是同步任务已完成，不需要轮询
+                                if (data.status === 'SUCCESS' && data?.data?.data && Array.isArray(data.data.data) && data.data.data.length > 0) {
+                                    // 这是同步任务已完成的情况，继续下面的同步处理逻辑
+                                    console.log('[Nano Banana 2] 检测到同步任务已完成，直接处理响应');
+                                } else {
+                                    // 其他情况都视为异步任务，需要轮询
+                                    taskIdForPoll = data.task_id;
+                                }
+                            }
+                            
+                            if (taskIdForPoll) {
+                                // 异步模式：获取task_id并启动轮询
+                                console.log('[Nano Banana 2] 异步模式：收到task_id:', taskIdForPoll, '开始轮询');
+                                
+                                // 更新历史记录状态
+                                setHistory((prev) => prev.map((hItem) => 
+                                    hItem.id === taskId 
+                                        ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: taskIdForPoll } 
+                                        : hItem
+                                ));
+                                
+                                // 获取sourceNodeId用于后续更新预览窗口
+                                const historyItem = history.find(h => h.id === taskId);
+                                const sourceNodeId = historyItem?.sourceNodeId;
+                                
+                                // 启动轮询（banana模型使用800秒超时）
+                                pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, 0, true);
+                                return;
+                            }
                         }
                         
-                        // 获取所有图片URL
-                        const imageUrls = imageData.map(item => item?.url).filter(Boolean);
-                        if (imageUrls.length === 0) {
-                            console.error('[即梦API] 响应数据:', data);
-                            throw new Error('No Image URL found in response');
-                        }
+                        // 处理响应数据：即梦API和banana2使用不同的响应格式（同步模式）
+                        let imageData = [];
+                        let imageUrls = [];
                         
-                        console.log('[即梦API] 获取到图片数量:', imageUrls.length, 'URLs:', imageUrls);
+                        if (isJimeng) {
+                            // 即梦API响应格式：{ "created": ..., "data": [{ "url": "..." }, ...] }
+                            // 4.1模型可能返回4张图片，3.1模型返回1张
+                            console.log('[即梦API] 响应数据:', data);
+                            imageData = data?.data || [];
+                            if (!imageData || imageData.length === 0) {
+                                console.error('[即梦API] 响应数据:', data);
+                                throw new Error('No Image URL found in response');
+                            }
+                            imageUrls = imageData.map(item => item?.url).filter(Boolean);
+                            if (imageUrls.length === 0) {
+                                console.error('[即梦API] 响应数据:', data);
+                                throw new Error('No Image URL found in response');
+                            }
+                            console.log('[即梦API] 获取到图片数量:', imageUrls.length, 'URLs:', imageUrls);
+                        } else if (isNanoBanana2) {
+                            // Nano Banana 2 可能使用多种响应格式：
+                            // 1. 标准OpenAI格式：{ "created": ..., "data": [{ "url": "..." }] }
+                            // 2. 嵌套格式：{ "status": "SUCCESS", "data": { "data": [{ "url": "..." }] } }
+                            // 3. 同步任务格式：{ "task_id": "...", "status": "SUCCESS", "data": { "data": [{ "url": "..." }] } }
+                            console.log('[Nano Banana 2] 响应数据:', data);
+                            
+                            // 检查是否有错误
+                            if (data?.error) {
+                                const errorMsg = data.error.message || data.error || 'Unknown error';
+                                console.error('[Nano Banana 2] 错误响应:', JSON.stringify(data, null, 2));
+                                throw new Error(`Nano Banana 2 API错误: ${errorMsg}`);
+                            }
+                            
+                            // 检查是否是同步任务响应（包含task_id和status）
+                            if (data?.task_id && data?.status === 'SUCCESS' && data?.data?.data) {
+                                // 同步任务格式：data.data 是图片数组
+                                imageData = data.data.data || [];
+                                console.log('[Nano Banana 2] 检测到同步任务响应格式，从 data.data 提取图片');
+                            } else if (data?.data?.data && Array.isArray(data.data.data)) {
+                                // 嵌套格式：data.data 是图片数组
+                                imageData = data.data.data || [];
+                                console.log('[Nano Banana 2] 检测到嵌套响应格式，从 data.data 提取图片');
+                            } else if (data?.data && Array.isArray(data.data)) {
+                                // 标准OpenAI格式：data 是图片数组
+                                imageData = data.data || [];
+                                console.log('[Nano Banana 2] 检测到标准OpenAI格式，从 data 提取图片');
+                            } else {
+                                imageData = [];
+                            }
+                            
+                            if (!imageData || imageData.length === 0) {
+                                console.error('[Nano Banana 2] 响应数据:', JSON.stringify(data, null, 2));
+                                throw new Error('No Image URL found in response');
+                            }
+                            
+                            // 提取图片URL，支持多种字段名
+                            imageUrls = imageData.map(item => {
+                                if (typeof item === 'string') return item;
+                                return item?.url || item?.image_url || item?.imageUrl || '';
+                            }).filter(Boolean);
+                            
+                            if (imageUrls.length === 0) {
+                                console.error('[Nano Banana 2] 响应数据:', JSON.stringify(data, null, 2));
+                                throw new Error('No Image URL found in response');
+                            }
+                            console.log('[Nano Banana 2] 获取到图片数量:', imageUrls.length, 'URLs:', imageUrls);
+                        } else {
+                            // 其他模型（OpenAI格式）
+                            console.log('[Image API] 响应数据:', data);
+                            
+                            // 检查是否有错误
+                            if (data?.error) {
+                                const errorMsg = data.error.message || data.error || 'Unknown error';
+                                console.error('[Image API] 错误响应:', JSON.stringify(data, null, 2));
+                                throw new Error(`Image API错误: ${errorMsg}`);
+                            }
+                            
+                            imageData = data?.data || [];
+                            if (!imageData || imageData.length === 0) {
+                                console.error('[Image API] 响应数据:', data);
+                                throw new Error('No Image URL found in response');
+                            }
+                            imageUrls = imageData.map(item => item?.url).filter(Boolean);
+                            if (imageUrls.length === 0) {
+                                console.error('[Image API] 响应数据:', data);
+                                throw new Error('No Image URL found in response');
+                            }
+                            console.log('[Image API] 获取到图片数量:', imageUrls.length, 'URLs:', imageUrls);
+                        }
                         
                         // 对于即梦模型，使用第一张图片作为主图片，但保存所有图片
                         const primaryUrl = imageUrls[0];
