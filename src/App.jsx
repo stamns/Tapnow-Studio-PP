@@ -1842,6 +1842,7 @@ const normalizeCustomParamNotes = (notes) => {
     });
     return next;
 };
+const normalizeValueNotes = (notes) => normalizeCustomParamNotes(notes);
 const normalizeCustomParams = (params) => {
     if (!Array.isArray(params)) return [];
     return params.map((param, index) => {
@@ -1874,12 +1875,14 @@ const getCustomParamSelection = (param, selections) => {
     if (byName !== undefined && byName !== null && byName !== '') return byName;
     return '';
 };
-const getCustomParamValueLabel = (param, value) => {
+const getValueLabelWithNotes = (value, notesEnabled, notes) => {
     if (!value) return '';
-    if (!param?.notesEnabled) return value;
-    const notes = param?.valueNotes || {};
-    const note = notes[value];
+    if (!notesEnabled) return value;
+    const note = notes?.[value];
     return note ? `${value}(${note})` : value;
+};
+const getCustomParamValueLabel = (param, value) => {
+    return getValueLabelWithNotes(value, !!param?.notesEnabled, param?.valueNotes || {});
 };
 const applyCustomParamsToPayload = (payload, customParams, selections) => {
     if (!payload || !Array.isArray(customParams) || customParams.length === 0) return payload;
@@ -4225,6 +4228,11 @@ function TapnowApp() {
         }
     }, [showToast]);
 
+    useEffect(() => {
+        if (!localCacheActive) return;
+        refreshLocalCache({ silent: true });
+    }, [localCacheActive, refreshLocalCache]);
+
     const getItemProxyPreference = useCallback((item) => {
         const providerKey = String(item?.provider || item?.apiConfig?.provider || '').trim();
         if (!providerKey) return false;
@@ -5049,8 +5057,12 @@ function TapnowApp() {
                 apiType: entry.apiType || 'openai',
                 ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
                 resolutionLimits: Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : null,
+                resolutionNotes: normalizeValueNotes(entry.resolutionNotes),
+                resolutionNotesEnabled: !!entry.resolutionNotesEnabled,
                 durations: Array.isArray(entry.durations) ? entry.durations : null,
                 videoResolutions: Array.isArray(entry.videoResolutions) ? entry.videoResolutions : null,
+                videoResolutionNotes: normalizeValueNotes(entry.videoResolutionNotes),
+                videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                 supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                 supportsHD: !!entry.supportsHD,
                 customParams: normalizeCustomParams(entry.customParams),
@@ -5075,8 +5087,12 @@ function TapnowApp() {
             apiType: resolvedLibrary?.apiType || config.apiType,
             ratioLimits: resolvedLibrary ? resolvedLibrary.ratioLimits : (config.ratioLimits || null),
             resolutionLimits: resolvedLibrary ? resolvedLibrary.resolutionLimits : (config.resolutionLimits || null),
+            resolutionNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.resolutionNotes) : normalizeValueNotes(config.resolutionNotes),
+            resolutionNotesEnabled: resolvedLibrary ? !!resolvedLibrary.resolutionNotesEnabled : !!config.resolutionNotesEnabled,
             durations: resolvedLibrary ? resolvedLibrary.durations : (config.durations || null),
             videoResolutions: resolvedLibrary ? resolvedLibrary.videoResolutions : (config.videoResolutions || null),
+            videoResolutionNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.videoResolutionNotes) : normalizeValueNotes(config.videoResolutionNotes),
+            videoResolutionNotesEnabled: resolvedLibrary ? !!resolvedLibrary.videoResolutionNotesEnabled : !!config.videoResolutionNotesEnabled,
             supportsFirstLastFrame: resolvedLibrary ? !!resolvedLibrary.supportsFirstLastFrame : !!config.supportsFirstLastFrame,
             supportsHD: resolvedLibrary ? !!resolvedLibrary.supportsHD : !!config.supportsHD,
             customParams: resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams),
@@ -5601,7 +5617,8 @@ function TapnowApp() {
         });
     }, [history]);
 
-    const buildLocalSaveFiles = useCallback(async (mediaItems = []) => {
+    const buildLocalSaveFiles = useCallback(async (mediaItems = [], options = {}) => {
+        const useProxyResolver = options.useProxyResolver;
         const files = [];
         const nameCounters = new Map();
         const seenUrls = new Set();
@@ -5613,9 +5630,9 @@ function TapnowApp() {
             seenUrls.add(url);
             try {
                 let content = url;
+                const useProxy = typeof useProxyResolver === 'function' ? !!useProxyResolver(item) : false;
                 if (!url.startsWith('data:')) {
-                    const res = await fetch(url);
-                    const blob = await res.blob();
+                    const { blob } = await fetchCacheSource(url, { useProxy });
                     content = await new Promise((resolve) => {
                         const reader = new FileReader();
                         reader.onloadend = () => resolve(reader.result);
@@ -5648,7 +5665,7 @@ function TapnowApp() {
             }
         }
         return files;
-    }, [getDataUrlExt, getFilenameFromUrl, sanitizeCacheId, projectName]);
+    }, [fetchCacheSource, getDataUrlExt, getFilenameFromUrl, sanitizeCacheId, projectName]);
 
     const getLocalSaveBaseUrl = useCallback((node) => {
         const raw = (node?.settings?.serverUrl || localServerUrl || '').trim();
@@ -5682,7 +5699,7 @@ function TapnowApp() {
             return;
         }
 
-        const files = await buildLocalSaveFiles(dedupedItems);
+        const files = await buildLocalSaveFiles(dedupedItems, { useProxyResolver: getItemProxyPreference });
         if (files.length === 0) {
             if (!silent) showToast('没有可保存的文件', 'warning');
             return;
@@ -5724,7 +5741,7 @@ function TapnowApp() {
             const skipSuffix = skippedCount > 0 ? `，已跳过 ${skippedCount} 个重复` : '';
             showToast(result.message || `已保存 ${successCount} 个文件${skipSuffix}`, 'success');
         }
-    }, [buildLocalSaveFiles, getFilenameFromUrl, getLocalSaveBaseUrl, showToast]);
+    }, [buildLocalSaveFiles, getFilenameFromUrl, getItemProxyPreference, getLocalSaveBaseUrl, showToast]);
 
     const testLocalSaveServer = useCallback(async (nodeId, rawUrl) => {
         const baseUrl = (rawUrl || localServerUrl || '').trim().replace(/\/+$/, '');
@@ -7037,8 +7054,12 @@ function TapnowApp() {
             type: 'Image',
             ratioLimits: null,
             resolutionLimits: null,
+            resolutionNotes: {},
+            resolutionNotesEnabled: false,
             durations: null,
             videoResolutions: null,
+            videoResolutionNotes: {},
+            videoResolutionNotesEnabled: false,
             supportsFirstLastFrame: false,
             supportsHD: false,
             apiType: 'openai',
@@ -12869,8 +12890,12 @@ function TapnowApp() {
                                 apiType: entry.apiType || 'openai',
                                 ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
                                 resolutionLimits: Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : null,
+                                resolutionNotes: normalizeValueNotes(entry.resolutionNotes),
+                                resolutionNotesEnabled: !!entry.resolutionNotesEnabled,
                                 durations: Array.isArray(entry.durations) ? entry.durations : null,
                                 videoResolutions: Array.isArray(entry.videoResolutions) ? entry.videoResolutions : null,
+                                videoResolutionNotes: normalizeValueNotes(entry.videoResolutionNotes),
+                                videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                                 supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                                 supportsHD: !!entry.supportsHD,
                                 customParams: normalizeCustomParams(entry.customParams)
@@ -18603,6 +18628,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     }, 0);
                                 }
                                 const resolutionOptions = getVideoResolutionsForModel(modelId);
+                                const resolutionConfig = getApiConfigByKey(modelId);
                                 const currentResolution = normalizeVideoResolution(node.settings?.resolution || lastUsedVideoResolution || '720P');
                                 const fallbackResolution = resolutionOptions.find((res) => res !== 'Auto') || '720P';
                                 const resolvedResolution = resolutionOptions.includes(currentResolution) ? currentResolution : fallbackResolution;
@@ -18757,7 +18783,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                 >
                                                     {resolutionOptions.map(res => (
-                                                        <option key={res} value={res}>{res === 'Auto' ? '不选' : res}</option>
+                                                        <option key={res} value={res}>
+                                                            {res === 'Auto'
+                                                                ? '不选'
+                                                                : getValueLabelWithNotes(res, !!resolutionConfig?.videoResolutionNotesEnabled, resolutionConfig?.videoResolutionNotes || {})}
+                                                        </option>
                                                     ))}
                                                 </select>
                                             </div>
@@ -22090,6 +22120,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             if (mode === 'video') {
                                                                                 const resOptions = getVideoResolutionsForModel(shot.model);
                                                                                 if (!resOptions.length) return null;
+                                                                                const resConfig = getApiConfigByKey(shot.model);
                                                                                 const currentRes = normalizeVideoResolution(shot.resolution || resOptions[0] || '720P');
                                                                                 const fallbackRes = resOptions[0] || '720P';
                                                                                 const resolvedRes = resOptions.includes(currentRes) ? currentRes : fallbackRes;
@@ -22109,13 +22140,16 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         title="分辨率"
                                                                                     >
                                                                                         {resOptions.map((res) => (
-                                                                                            <option key={res} value={res}>{res}</option>
+                                                                                            <option key={res} value={res}>
+                                                                                                {getValueLabelWithNotes(res, !!resConfig?.videoResolutionNotesEnabled, resConfig?.videoResolutionNotes || {})}
+                                                                                            </option>
                                                                                         ))}
                                                                                     </select>
                                                                                 );
                                                                             } else {
                                                                                 // 图片模式：显示Auto/1K/2K/4K
                                                                                 const resOptions = getResolutionsForModel(shot.model);
+                                                                                const resConfig = getApiConfigByKey(shot.model);
                                                                                 const currentRes = normalizeImageResolution(shot.resolution || '2K');
                                                                                 const fallbackRes = resOptions[0] || '2K';
                                                                                 const resolvedRes = resOptions.includes(currentRes) ? currentRes : fallbackRes;
@@ -22135,7 +22169,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         title="分辨率"
                                                                                     >
                                                                                         {resOptions.map(res => (
-                                                                                            <option key={res} value={res}>{res}</option>
+                                                                                            <option key={res} value={res}>
+                                                                                                {getValueLabelWithNotes(res, !!resConfig?.resolutionNotesEnabled, resConfig?.resolutionNotes || {})}
+                                                                                            </option>
                                                                                         ))}
                                                                                     </select>
                                                                                 );
@@ -23876,7 +23912,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
                                                                 }`}
                                                         >
-                                                            {resolvedResolution === 'Auto' ? '不选' : resolvedResolution}
+                                                            {resolvedResolution === 'Auto'
+                                                                ? '不选'
+                                                                : getValueLabelWithNotes(
+                                                                    resolvedResolution,
+                                                                    !!currentModel?.videoResolutionNotesEnabled,
+                                                                    currentModel?.videoResolutionNotes || {}
+                                                                )}
                                                         </button>
                                                         {activeDropdown?.nodeId === node.id && activeDropdown.type === 'vres' && (
                                                             <div
@@ -23902,7 +23944,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     : theme === 'solarized' ? 'text-zinc-700 hover:bg-[#fdf6e3]' : 'text-zinc-700 hover:bg-zinc-100'
                                                                     }`}
                                                                     >
-                                                                        {r === 'Auto' ? '不选' : r}
+                                                                        {r === 'Auto'
+                                                                            ? '不选'
+                                                                            : getValueLabelWithNotes(
+                                                                                r,
+                                                                                !!currentModel?.videoResolutionNotesEnabled,
+                                                                                currentModel?.videoResolutionNotes || {}
+                                                                            )}
                                                                     </button>
                                                                 ))}
                                                             </div>
@@ -23936,6 +23984,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             const displayResolution = availableResolutions.includes(normalizedResolution)
                                                                 ? normalizedResolution
                                                                 : (availableResolutions[0] || '2K');
+                                                            const displayLabel = getValueLabelWithNotes(
+                                                                displayResolution,
+                                                                !!currentModel?.resolutionNotesEnabled,
+                                                                currentModel?.resolutionNotes || {}
+                                                            );
                                                             // 如果当前分辨率不在可用选项中，自动更新
                                                             if (currentResolution !== normalizedResolution && availableResolutions.includes(normalizedResolution)) {
                                                                 setTimeout(() => {
@@ -23946,7 +23999,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     updateNodeSettings(node.id, { resolution: availableResolutions[0] });
                                                                 }, 0);
                                                             }
-                                                            return displayResolution;
+                                                            return displayLabel;
                                                         })()}
                                                     </button>
                                                     {activeDropdown?.nodeId === node.id && activeDropdown.type === 'res' && (() => {
@@ -23975,7 +24028,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             : theme === 'solarized' ? 'text-zinc-700 hover:bg-[#fdf6e3]' : 'text-zinc-700 hover:bg-zinc-100'
                                                                             }`}
                                                                     >
-                                                                        {r}
+                                                                        {getValueLabelWithNotes(r, !!currentModel?.resolutionNotesEnabled, currentModel?.resolutionNotes || {})}
                                                                     </button>
                                                                 ))}
                                                             </div>
@@ -26313,8 +26366,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const promptSlug = (item.prompt || 'download').replace(/[\\/:*?"<>|]/g, '_').slice(0, 50);
                                             const filename = `${promptSlug}.${ext}`;
 
-                                            const response = await fetch(resolvedUrl);
-                                            const blob = await response.blob();
+                                            const useProxy = getItemProxyPreference(item);
+                                            const { blob } = await fetchCacheSource(resolvedUrl, { useProxy });
                                             const blobUrl = window.URL.createObjectURL(blob);
                                             const a = document.createElement('a');
                                             a.href = blobUrl;
@@ -27477,8 +27530,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const ratioAll = entry.ratioLimits === null;
                                             const ratioValues = Array.isArray(entry.ratioLimits) ? entry.ratioLimits : [];
                                             const resolutionValues = Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : [];
+                                            const resolutionNotes = entry.resolutionNotes || {};
+                                            const resolutionNotesEnabled = !!entry.resolutionNotesEnabled;
                                             const durationValues = Array.isArray(entry.durations) ? entry.durations : [];
                                             const videoResolutionValues = Array.isArray(entry.videoResolutions) ? entry.videoResolutions : [];
+                                            const videoResolutionNotes = entry.videoResolutionNotes || {};
+                                            const videoResolutionNotesEnabled = !!entry.videoResolutionNotesEnabled;
                                             const customParams = Array.isArray(entry.customParams) ? entry.customParams : [];
                                             const previewBase = {
                                                 model: entry.modelName || entry.id,
@@ -27638,12 +27695,60 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <TagListEditor
                                                                             label="图片分辨率"
                                                                             values={resolutionValues}
-                                                                            onChange={(values) => updateModelLibraryEntry(entry.id, { resolutionLimits: values })}
+                                                                            onChange={(values) => {
+                                                                                const nextNotes = { ...resolutionNotes };
+                                                                                Object.keys(nextNotes).forEach((key) => {
+                                                                                    if (!values.includes(key)) delete nextNotes[key];
+                                                                                });
+                                                                                updateModelLibraryEntry(entry.id, { resolutionLimits: values, resolutionNotes: nextNotes });
+                                                                            }}
                                                                             placeholder="例：1K,2K,4K"
                                                                             disabled={!isEditing}
                                                                             theme={theme}
                                                                             normalizeItem={(value) => String(value).toUpperCase()}
+                                                                            formatItem={(value) => getValueLabelWithNotes(value, resolutionNotesEnabled, resolutionNotes)}
                                                                         />
+                                                                        {resolutionValues.length > 0 && (
+                                                                            <div className="mt-1 space-y-1">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率显示名</div>
+                                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={resolutionNotesEnabled}
+                                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { resolutionNotesEnabled: e.target.checked })}
+                                                                                            disabled={!isEditing}
+                                                                                        />
+                                                                                        <span>启用重命名</span>
+                                                                                    </label>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
+                                                                                </div>
+                                                                                {resolutionNotesEnabled && resolutionValues.map((value) => (
+                                                                                    <div key={value} className="flex items-center gap-2">
+                                                                                        <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
+                                                                                        <input
+                                                                                            value={resolutionNotes[value] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const nextNotes = { ...resolutionNotes };
+                                                                                                const noteValue = e.target.value;
+                                                                                                if (noteValue) {
+                                                                                                    nextNotes[value] = noteValue;
+                                                                                                } else {
+                                                                                                    delete nextNotes[value];
+                                                                                                }
+                                                                                                updateModelLibraryEntry(entry.id, { resolutionNotes: nextNotes });
+                                                                                            }}
+                                                                                            placeholder="例：1:1 / 高清"
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                             )}
@@ -27682,12 +27787,60 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <TagListEditor
                                                                             label="视频分辨率"
                                                                             values={videoResolutionValues}
-                                                                            onChange={(values) => updateModelLibraryEntry(entry.id, { videoResolutions: values })}
+                                                                            onChange={(values) => {
+                                                                                const nextNotes = { ...videoResolutionNotes };
+                                                                                Object.keys(nextNotes).forEach((key) => {
+                                                                                    if (!values.includes(key)) delete nextNotes[key];
+                                                                                });
+                                                                                updateModelLibraryEntry(entry.id, { videoResolutions: values, videoResolutionNotes: nextNotes });
+                                                                            }}
                                                                             placeholder="例：720P,1080P"
                                                                             disabled={!isEditing}
                                                                             theme={theme}
                                                                             normalizeItem={(value) => normalizeVideoResolution(value)}
+                                                                            formatItem={(value) => getValueLabelWithNotes(value, videoResolutionNotesEnabled, videoResolutionNotes)}
                                                                         />
+                                                                        {videoResolutionValues.length > 0 && (
+                                                                            <div className="mt-1 space-y-1">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率显示名</div>
+                                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={videoResolutionNotesEnabled}
+                                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { videoResolutionNotesEnabled: e.target.checked })}
+                                                                                            disabled={!isEditing}
+                                                                                        />
+                                                                                        <span>启用重命名</span>
+                                                                                    </label>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
+                                                                                </div>
+                                                                                {videoResolutionNotesEnabled && videoResolutionValues.map((value) => (
+                                                                                    <div key={value} className="flex items-center gap-2">
+                                                                                        <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
+                                                                                        <input
+                                                                                            value={videoResolutionNotes[value] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const nextNotes = { ...videoResolutionNotes };
+                                                                                                const noteValue = e.target.value;
+                                                                                                if (noteValue) {
+                                                                                                    nextNotes[value] = noteValue;
+                                                                                                } else {
+                                                                                                    delete nextNotes[value];
+                                                                                                }
+                                                                                                updateModelLibraryEntry(entry.id, { videoResolutionNotes: nextNotes });
+                                                                                            }}
+                                                                                            placeholder="例：16:9 / 竖屏"
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                     <div className="col-span-12 flex items-center gap-3 pt-1">
                                                                         <label className={`flex items-center gap-1 text-[10px] ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`}>
