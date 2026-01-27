@@ -3501,6 +3501,8 @@ function TapnowApp() {
     const cachedHistoryUrlRef = useRef(new Map());
     const localCachePathRef = useRef({ savePath: '', imageSavePath: '', videoSavePath: '' });
     const cacheFetchFailureRef = useRef(new Map());
+    const cacheImageRunRef = useRef(false);
+    const cacheVideoRunRef = useRef(false);
 
     // 持久化性能模式和本地服务器设置
     useEffect(() => {
@@ -4664,9 +4666,20 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 历史记录本地缓存（图片）
     useEffect(() => {
-        if (!localCacheActive) return;
+        if (!localCacheActive) {
+            console.info('[Cache] image cache effect: inactive');
+            return;
+        }
+        console.info('[Cache] image cache effect', {
+            historyCount: history.length,
+            refreshTick: cacheRefreshTick,
+            imageSavePath: localServerConfig.imageSavePath || '',
+            videoSavePath: localServerConfig.videoSavePath || ''
+        });
 
         const cacheHistoryImages = async () => {
+            if (cacheImageRunRef.current) return;
+            cacheImageRunRef.current = true;
             const summary = {
                 total: history.length,
                 processed: 0,
@@ -4678,21 +4691,22 @@ function TapnowApp() {
                 proxy: 0,
                 direct: 0
             };
-            console.info('[Cache] image cache start', {
-                total: history.length,
-                imageSavePath: localServerConfig.imageSavePath || '',
-                videoSavePath: localServerConfig.videoSavePath || ''
-            });
-            const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
-            const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-            const isCacheUrlMismatch = (url) => {
-                if (!url) return false;
-                const text = String(url);
-                if (!text.includes('/file/')) return true;
-                return expectedSegment && !text.includes(expectedSegment);
-            };
+            try {
+                console.info('[Cache] image cache start', {
+                    total: history.length,
+                    imageSavePath: localServerConfig.imageSavePath || '',
+                    videoSavePath: localServerConfig.videoSavePath || ''
+                });
+                const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
+                const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
+                const isCacheUrlMismatch = (url) => {
+                    if (!url) return false;
+                    const text = String(url);
+                    if (!text.includes('/file/')) return true;
+                    return expectedSegment && !text.includes(expectedSegment);
+                };
 
-            for (const item of history) {
+                for (const item of history) {
                 const status = item?.status;
                 const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
                 if (!isCacheableStatus) { summary.skippedStatus++; continue; }
@@ -4828,25 +4842,39 @@ function TapnowApp() {
                     }
                 }
 
-                if (cacheMapUpdated || localCacheUrl !== item.localCacheUrl) {
-                    const nextCacheMap = Object.keys(cacheMap).length > 0 ? cacheMap : null;
-                    setHistory(prev => prev.map(h =>
-                        h.id === item.id ? { ...h, localCacheUrl: localCacheUrl || null, localFilePath: localFilePath || null, localCacheMap: nextCacheMap } : h
-                    ));
+                    if (cacheMapUpdated || localCacheUrl !== item.localCacheUrl) {
+                        const nextCacheMap = Object.keys(cacheMap).length > 0 ? cacheMap : null;
+                        setHistory(prev => prev.map(h =>
+                            h.id === item.id ? { ...h, localCacheUrl: localCacheUrl || null, localFilePath: localFilePath || null, localCacheMap: nextCacheMap } : h
+                        ));
+                    }
                 }
+                console.info('[Cache] image cache summary', summary);
+            } finally {
+                cacheImageRunRef.current = false;
             }
-            console.info('[Cache] image cache summary', summary);
         };
 
+        cacheHistoryImages();
         const timer = setTimeout(cacheHistoryImages, 3000);
         return () => clearTimeout(timer);
     }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
 
     // V2.6.1 Feature: 历史记录本地缓存（视频）
     useEffect(() => {
-        if (!localCacheActive) return;
+        if (!localCacheActive) {
+            console.info('[Cache] video cache effect: inactive');
+            return;
+        }
+        console.info('[Cache] video cache effect', {
+            historyCount: history.length,
+            refreshTick: cacheRefreshTick,
+            videoSavePath: localServerConfig.videoSavePath || ''
+        });
 
         const cacheHistoryVideos = async () => {
+            if (cacheVideoRunRef.current) return;
+            cacheVideoRunRef.current = true;
             const summary = {
                 total: history.length,
                 processed: 0,
@@ -4858,19 +4886,20 @@ function TapnowApp() {
                 proxy: 0,
                 direct: 0
             };
-            console.info('[Cache] video cache start', {
-                total: history.length,
-                videoSavePath: localServerConfig.videoSavePath || ''
-            });
-            const preferHistoryPath = !!localServerConfig.videoSavePath;
-            const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-            const isCacheUrlMismatch = (url) => {
-                if (!url) return false;
-                const text = String(url);
-                if (!text.includes('/file/')) return true;
-                return expectedSegment && !text.includes(expectedSegment);
-            };
-            for (const item of history) {
+            try {
+                console.info('[Cache] video cache start', {
+                    total: history.length,
+                    videoSavePath: localServerConfig.videoSavePath || ''
+                });
+                const preferHistoryPath = !!localServerConfig.videoSavePath;
+                const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
+                const isCacheUrlMismatch = (url) => {
+                    if (!url) return false;
+                    const text = String(url);
+                    if (!text.includes('/file/')) return true;
+                    return expectedSegment && !text.includes(expectedSegment);
+                };
+                for (const item of history) {
                 const status = item?.status;
                 const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
                 if (!isCacheableStatus) { summary.skippedStatus++; continue; }
@@ -4886,31 +4915,35 @@ function TapnowApp() {
                 if (item.localCacheUrl) continue;
                 if (triedCacheIdsRef.current.has(item.id)) continue;
                 triedCacheIdsRef.current.add(item.id);
-                if (videoUrl && (videoUrl.includes('localhost:') || videoUrl.includes('127.0.0.1:'))) continue;
+                    if (videoUrl && (videoUrl.includes('localhost:') || videoUrl.includes('127.0.0.1:'))) continue;
 
-                if (!videoUrl || videoUrl.startsWith('blob:') || videoUrl.includes('...')) { summary.skippedEmpty++; continue; }
-                summary.processed++;
+                    if (!videoUrl || videoUrl.startsWith('blob:') || videoUrl.includes('...')) { summary.skippedEmpty++; continue; }
+                    summary.processed++;
 
-                try {
-                    const useProxy = getProxyPreferenceForUrl(videoUrl, baseProxy);
-                    if (useProxy) summary.proxy++; else summary.direct++;
-                    const result = await saveVideoToLocalCache(item.id, videoUrl, 'history', { useProxy });
-                    if (result) {
-                        setHistory(prev => prev.map(h =>
-                            h.id === item.id ? { ...h, localCacheUrl: result.url, localFilePath: result.path } : h
-                        ));
-                        summary.saved++;
-                    } else {
+                    try {
+                        const useProxy = getProxyPreferenceForUrl(videoUrl, baseProxy);
+                        if (useProxy) summary.proxy++; else summary.direct++;
+                        const result = await saveVideoToLocalCache(item.id, videoUrl, 'history', { useProxy });
+                        if (result) {
+                            setHistory(prev => prev.map(h =>
+                                h.id === item.id ? { ...h, localCacheUrl: result.url, localFilePath: result.path } : h
+                            ));
+                            summary.saved++;
+                        } else {
+                            summary.failed++;
+                        }
+                    } catch (e) {
+                        console.warn('[历史缓存] 视频缓存失败:', item.id, e);
                         summary.failed++;
                     }
-                } catch (e) {
-                    console.warn('[历史缓存] 视频缓存失败:', item.id, e);
-                    summary.failed++;
                 }
+                console.info('[Cache] video cache summary', summary);
+            } finally {
+                cacheVideoRunRef.current = false;
             }
-            console.info('[Cache] video cache summary', summary);
         };
 
+        cacheHistoryVideos();
         const timer = setTimeout(cacheHistoryVideos, 5000);
         return () => clearTimeout(timer);
     }, [history, localCacheActive, localServerConfig.videoSavePath, saveVideoToLocalCache, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
