@@ -4104,15 +4104,9 @@ function TapnowApp() {
     }, [resolveCacheFetchUrl, getBlobFromUrl]);
 
     const saveImageToLocalCache = useCallback(async (itemId, imageUrl, category = 'history', options = {}) => {
-        if (!localCacheActive) {
-            console.info('[Cache] skip save-image: local cache inactive', { itemId, category });
-            return null;
-        }
+        if (!localCacheActive) return null;
         const baseUrl = (localServerUrl || '').replace(/\/+$/, '');
-        if (!baseUrl) {
-            console.info('[Cache] skip save-image: empty local server url', { itemId, category });
-            return null;
-        }
+        if (!baseUrl) return null;
         const useProxy = options.useProxy === true;
         try {
             const forcedId = options?.forceId ? sanitizeCacheId(itemId || '') : '';
@@ -4120,10 +4114,7 @@ function TapnowApp() {
 
             let content = imageUrl;
             if (!imageUrl.startsWith('data:')) {
-                if (!useProxy && shouldSkipCacheFetch(imageUrl)) {
-                    console.info('[Cache] skip save-image: recent failure', { itemId, url: imageUrl });
-                    return null;
-                }
+                if (!useProxy && shouldSkipCacheFetch(imageUrl)) return null;
                 const { blob } = await fetchCacheSource(imageUrl, { useProxy });
                 content = await new Promise((resolve) => {
                     const reader = new FileReader();
@@ -4134,7 +4125,6 @@ function TapnowApp() {
                 content = normalizeDataUrl(imageUrl);
             }
             const ext = getDataUrlExt(content, getUrlExt(imageUrl, '.jpg'));
-            console.info('[Cache] save-image -> /save-cache', { itemId, saveId, category, useProxy, ext });
 
             const res = await fetch(`${baseUrl}/save-cache`, {
                 method: 'POST',
@@ -4157,23 +4147,14 @@ function TapnowApp() {
     }, [localCacheActive, localServerUrl, getCacheIdFromUrl, getDataUrlExt, getUrlExt, sanitizeCacheId, shouldSkipCacheFetch, fetchCacheSource, recordCacheFetchFailure]);
 
     const saveVideoToLocalCache = useCallback(async (itemId, videoUrl, category = 'history', options = {}) => {
-        if (!localCacheActive) {
-            console.info('[Cache] skip save-video: local cache inactive', { itemId, category });
-            return null;
-        }
+        if (!localCacheActive) return null;
         const baseUrl = (localServerUrl || '').replace(/\/+$/, '');
-        if (!baseUrl) {
-            console.info('[Cache] skip save-video: empty local server url', { itemId, category });
-            return null;
-        }
+        if (!baseUrl) return null;
         const useProxy = options.useProxy === true;
         try {
             const saveId = getCacheIdFromUrl(videoUrl, itemId);
 
-            if (!useProxy && shouldSkipCacheFetch(videoUrl)) {
-                console.info('[Cache] skip save-video: recent failure', { itemId, url: videoUrl });
-                return null;
-            }
+            if (!useProxy && shouldSkipCacheFetch(videoUrl)) return null;
             const { blob } = await fetchCacheSource(videoUrl, { useProxy });
             const content = await new Promise((resolve) => {
                 const reader = new FileReader();
@@ -4181,7 +4162,6 @@ function TapnowApp() {
                 reader.readAsDataURL(blob);
             });
             const ext = getDataUrlExt(content, getUrlExt(videoUrl, '.mp4'));
-            console.info('[Cache] save-video -> /save-cache', { itemId, saveId, category, useProxy, ext });
 
             const saveRes = await fetch(`${baseUrl}/save-cache`, {
                 method: 'POST',
@@ -4258,14 +4238,6 @@ function TapnowApp() {
     }, [localServerUrl, showToast, normalizeLocalPath]);
 
     const refreshLocalCache = useCallback((options = {}) => {
-        console.info('[Cache] refreshLocalCache', {
-            enabled: localCacheEnabled,
-            connected: localCacheServerConnected,
-            active: localCacheActive,
-            historyCount: history.length,
-            imageSavePath: localServerConfig.imageSavePath || '',
-            videoSavePath: localServerConfig.videoSavePath || ''
-        });
         triedCacheIdsRef.current = new Set();
         thumbnailCacheRef.current = new Map();
         localCacheCheckRef.current = new Map();
@@ -4666,16 +4638,7 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 历史记录本地缓存（图片）
     useEffect(() => {
-        if (!localCacheActive) {
-            console.info('[Cache] image cache effect: inactive');
-            return;
-        }
-        console.info('[Cache] image cache effect', {
-            historyCount: history.length,
-            refreshTick: cacheRefreshTick,
-            imageSavePath: localServerConfig.imageSavePath || '',
-            videoSavePath: localServerConfig.videoSavePath || ''
-        });
+        if (!localCacheActive) return;
 
         const cacheHistoryImages = async () => {
             if (cacheImageRunRef.current) return;
@@ -4692,11 +4655,6 @@ function TapnowApp() {
                 direct: 0
             };
             try {
-                console.info('[Cache] image cache start', {
-                    total: history.length,
-                    imageSavePath: localServerConfig.imageSavePath || '',
-                    videoSavePath: localServerConfig.videoSavePath || ''
-                });
                 const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
                 const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
                 const isCacheUrlMismatch = (url) => {
@@ -4849,7 +4807,6 @@ function TapnowApp() {
                         ));
                     }
                 }
-                console.info('[Cache] image cache summary', summary);
             } finally {
                 cacheImageRunRef.current = false;
             }
@@ -4862,15 +4819,7 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 历史记录本地缓存（视频）
     useEffect(() => {
-        if (!localCacheActive) {
-            console.info('[Cache] video cache effect: inactive');
-            return;
-        }
-        console.info('[Cache] video cache effect', {
-            historyCount: history.length,
-            refreshTick: cacheRefreshTick,
-            videoSavePath: localServerConfig.videoSavePath || ''
-        });
+        if (!localCacheActive) return;
 
         const cacheHistoryVideos = async () => {
             if (cacheVideoRunRef.current) return;
@@ -4887,10 +4836,6 @@ function TapnowApp() {
                 direct: 0
             };
             try {
-                console.info('[Cache] video cache start', {
-                    total: history.length,
-                    videoSavePath: localServerConfig.videoSavePath || ''
-                });
                 const preferHistoryPath = !!localServerConfig.videoSavePath;
                 const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
                 const isCacheUrlMismatch = (url) => {
@@ -4937,7 +4882,6 @@ function TapnowApp() {
                         summary.failed++;
                     }
                 }
-                console.info('[Cache] video cache summary', summary);
             } finally {
                 cacheVideoRunRef.current = false;
             }
@@ -11170,16 +11114,6 @@ function TapnowApp() {
                         }
 
                         const maskDataUrl = finalMaskBlob ? await blobToDataURL(finalMaskBlob) : null;
-                        console.info('[Jimeng] img2img refs', {
-                            count: connectedImages.length,
-                            refs: connectedImages.slice(0, 3).map((imgUrl) => ({
-                                url: imgUrl,
-                                useProxy: resolveSourceProxy(imgUrl),
-                                cached: localCacheActive
-                                    ? (historyLocalCacheMap.get(imgUrl) || (cachedHistoryUrlRef.current.has(imgUrl) ? cachedHistoryUrlRef.current.get(imgUrl) : null))
-                                    : null
-                            }))
-                        });
                         const imagePromises = connectedImages.map(async (imgUrl) => {
                             try {
                                 return await getDataUrlFromUrl(imgUrl, { useProxy: resolveSourceProxy(imgUrl) });
@@ -11192,7 +11126,6 @@ function TapnowApp() {
                             }
                         });
                         const base64Images = await Promise.all(imagePromises);
-                        console.info('[Jimeng] img2img base64 sizes', base64Images.map(b => (b ? b.length : 0)));
                         const jimengModelName = getJimengModelName();
 
                         payload = {
