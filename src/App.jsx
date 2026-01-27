@@ -3931,7 +3931,7 @@ function TapnowApp() {
         return `cache_${hashed}`;
     }, [getFilenameFromUrl, sanitizeCacheId, hashString]);
 
-    const generateThumbnail = useCallback(async (imageUrl, quality = 'normal') => {
+    const generateThumbnail = useCallback(async (imageUrl, quality = 'normal', options = {}) => {
         const config = quality === 'ultra'
             ? { maxSize: 80, jpegQuality: 0.3 }
             : { maxSize: 150, jpegQuality: 0.6 };
@@ -3941,17 +3941,19 @@ function TapnowApp() {
             if (LocalImageManager.isImageId(resolvedUrl)) {
                 resolvedUrl = await LocalImageManager.getImage(resolvedUrl);
             }
-            if (resolvedUrl && resolvedUrl.startsWith('data:')) {
-                resolvedUrl = normalizeDataUrl(resolvedUrl);
-            }
         } catch (e) {
             return null;
         }
         if (!resolvedUrl) return null;
-        return new Promise((resolve) => {
-            try {
+        try {
+            const blob = await getBlobFromUrl(resolvedUrl, {
+                useProxy: options.useProxy,
+                preferLocal: options.preferLocal
+            });
+            if (!blob) return null;
+            const blobUrl = URL.createObjectURL(blob);
+            return await new Promise((resolve) => {
                 const img = new Image();
-                img.crossOrigin = 'anonymous';
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let w = img.naturalWidth;
@@ -3965,15 +3967,20 @@ function TapnowApp() {
                     canvas.height = h;
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, w, h);
-                    resolve(canvas.toDataURL('image/jpeg', config.jpegQuality));
+                    const dataUrl = canvas.toDataURL('image/jpeg', config.jpegQuality);
+                    URL.revokeObjectURL(blobUrl);
+                    resolve(dataUrl);
                 };
-                img.onerror = () => resolve(null);
-                img.src = resolvedUrl;
-            } catch (e) {
-                resolve(null);
-            }
-        });
-    }, []);
+                img.onerror = () => {
+                    URL.revokeObjectURL(blobUrl);
+                    resolve(null);
+                };
+                img.src = blobUrl;
+            });
+        } catch (e) {
+            return null;
+        }
+    }, [getBlobFromUrl]);
 
     const resolveCacheFetchUrl = useCallback((rawUrl, useProxy = false) => {
         if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
@@ -3986,30 +3993,53 @@ function TapnowApp() {
         return `${base}/proxy?url=${encodeURIComponent(rawUrl)}`;
     }, [localServerUrl]);
 
-    // 获取 Blob 对象（兼容 HTTP URL 和 Blob URL）
+    // 获取 Blob 对象（统一资源获取渠道）
     const getBlobFromUrl = async (url, options = {}) => {
         if (!url) throw new Error('Invalid URL');
-        const useProxy = options.useProxy === true;
+        const preferLocal = options.preferLocal !== false && localCacheActive;
+        const rawUrl = String(url);
         const fetchBlob = async (target) => {
             const res = await fetch(target);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.blob();
         };
-        if (url.startsWith('data:')) {
-            const blob = dataUrlToBlob(url);
+        if (rawUrl.startsWith('data:')) {
+            const normalized = normalizeDataUrl(rawUrl);
+            const blob = dataUrlToBlob(normalized);
             if (!blob) throw new Error('Invalid base64 payload');
             return blob;
         }
-        if (url.startsWith('blob:')) {
+        if (rawUrl.startsWith('blob:')) {
             try {
-                return await fetchBlob(url);
+                return await fetchBlob(rawUrl);
             } catch (e) {
                 throw new Error('Blob 已失效');
             }
         }
-        const targetUrl = useProxy ? resolveCacheFetchUrl(url, true) : url;
-        if (!targetUrl) throw new Error('Invalid URL');
-        return await fetchBlob(targetUrl);
+        let targetUrl = rawUrl;
+        if (preferLocal && historyLocalCacheMap && historyLocalCacheMap.has(rawUrl)) {
+            const cached = historyLocalCacheMap.get(rawUrl);
+            if (cached) targetUrl = cached;
+        }
+        if (targetUrl.startsWith('data:')) {
+            const normalized = normalizeDataUrl(targetUrl);
+            const blob = dataUrlToBlob(normalized);
+            if (!blob) throw new Error('Invalid base64 payload');
+            return blob;
+        }
+        if (targetUrl.startsWith('blob:')) {
+            try {
+                return await fetchBlob(targetUrl);
+            } catch (e) {
+                throw new Error('Blob 已失效');
+            }
+        }
+        const useProxy = typeof options.useProxy === 'boolean'
+            ? options.useProxy
+            : (typeof getProxyPreferenceForUrl === 'function' ? getProxyPreferenceForUrl(rawUrl, false) : false);
+        const resolvedTarget = useProxy ? resolveCacheFetchUrl(targetUrl, true) : targetUrl;
+        if (!resolvedTarget) throw new Error('Invalid URL');
+        return await fetchBlob(resolvedTarget);
     };
 
     // 获取 Base64 字符串（自动识别 Data URL 或 Blob URL 并转换）
@@ -4090,18 +4120,14 @@ function TapnowApp() {
     const fetchCacheSource = useCallback(async (imageUrl, options = {}) => {
         const useProxy = options.useProxy === true;
         if (!imageUrl) throw new Error('缓存拉取失败: 空链接');
-        const isLocalData = imageUrl.startsWith('data:') || imageUrl.startsWith('blob:');
-        const resolvedUrl = (!isLocalData && useProxy)
-            ? resolveCacheFetchUrl(imageUrl, true)
-            : imageUrl;
         try {
-            const blob = await getBlobFromUrl(resolvedUrl, { useProxy: false });
+            const blob = await getBlobFromUrl(imageUrl, { useProxy, preferLocal: false });
             if (!blob || blob.size === 0) throw new Error('缓存拉取失败: 空文件');
-            return { blob, source: resolvedUrl };
+            return { blob, source: imageUrl };
         } catch (err) {
             throw err || new Error('缓存拉取失败');
         }
-    }, [resolveCacheFetchUrl, getBlobFromUrl]);
+    }, [getBlobFromUrl]);
 
     const saveImageToLocalCache = useCallback(async (itemId, imageUrl, category = 'history', options = {}) => {
         if (!localCacheActive) return null;
@@ -12246,11 +12272,7 @@ function TapnowApp() {
                     console.warn(`节点 ${node.id} 的内容URL无效: `, url);
                     continue;
                 }
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText} `);
-                }
-                const blob = await response.blob();
+                const blob = await getBlobFromUrl(url);
                 const blobUrl = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = blobUrl;
